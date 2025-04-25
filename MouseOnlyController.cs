@@ -22,12 +22,12 @@ namespace MouseOnlyMod
 
         void Update()
         {
-            // Toggle mouse-only mode with M key.
+            // Toggle Mouse-Only Mod with M key.
             if (Input.GetKeyDown(KeyCode.M))
             {
                 mouseOnlyEnabled = !mouseOnlyEnabled;
                 Plugin.MouseOnlyEnabled = mouseOnlyEnabled;
-                ETGModConsole.Log($"Mouse-only mode: {(mouseOnlyEnabled ? "ENABLED" : "DISABLED")}");
+                ETGModConsole.Log($"Mouse-Only Mod: {(mouseOnlyEnabled ? "ENABLED" : "DISABLED")}");
             }
         }
     }

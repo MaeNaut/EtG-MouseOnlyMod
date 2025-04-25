@@ -236,7 +236,7 @@ namespace MouseOnlyMod
         {
             Vector2 offsetOrigin = player.CenterPosition + new Vector2(0f, -0.5f);
             Vector2 step = direction.normalized * 0.5f; // checks every ~0.5 units
-            int steps = Mathf.CeilToInt(distance / 0.5f);
+            int steps = Mathf.Max(1, Mathf.CeilToInt(distance / 0.5f));
 
             for (int i = 1; i <= steps; i++)
             {
@@ -253,7 +253,7 @@ namespace MouseOnlyMod
                 // If the direction contains a wall, pit, or door, return false.
                 bool isFloor = cellData.type == CellType.FLOOR;
                 bool isDoor = cellData.isDoorFrameCell;
-                if (!isFloor || isDoor)
+                if (!isFloor || (isDoor && player.IsInCombat))
                     return false;
             }
 
@@ -264,7 +264,7 @@ namespace MouseOnlyMod
         public static void TryMove(PlayerController player, Vector2 direction, float speed)
         {
             // If the direction is valid, move.
-            if (IsDirectionClear(player, direction, 0.0f))
+            if (IsDirectionClear(player, direction))
             {
                 player.specRigidbody.Velocity = direction * speed;
             }
@@ -338,39 +338,6 @@ namespace MouseOnlyMod
         // Check if the player will get hit by the dangerous bullet next frame.
         public static bool WillBulletHitPlayerNextFrame(PlayerController player, List<Projectile> dangerousBullets)
         {
-            //// Calculate the player's position in next frame.
-            //Vector2 playerPos = player.CenterPosition;
-            //Vector2 playerVel = player.specRigidbody.Velocity;
-            //Vector2 nextPlayerPos = playerPos + playerVel * BraveTime.DeltaTime;
-
-            //PixelCollider playerCollider = player.specRigidbody?.HitboxPixelCollider;
-            //if (playerCollider == null)
-            //    return false;
-
-            //foreach (Projectile proj in StaticReferenceManager.AllProjectiles)
-            //{
-            //    // Ignore friendly bullets
-            //    if (proj.Owner is PlayerController)
-            //        continue;
-
-            //    // Calculate the projectile's position in next frame.
-            //    Vector2 projPos = proj.sprite.WorldCenter;
-            //    Vector2 projVel = proj.Direction.normalized * proj.Speed;
-            //    Vector2 nextprojPos = projPos + projVel * BraveTime.DeltaTime;
-
-            //    PixelCollider projCollider = proj.specRigidbody?.PrimaryPixelCollider;
-            //    if (projCollider == null)
-            //        return false;
-
-            //    // Calculate the collision using future positions and their collider information.
-            //    if (CheckAABBCollision(projCollider, nextprojPos, playerCollider, nextPlayerPos))
-            //    {
-            //        return true;
-            //    }
-            //}
-
-            //return false;
-
             // Calculate the player's position in next frame.
             Vector2 playerPos = player.CenterPosition;
             Vector2 playerVel = player.specRigidbody.Velocity;
