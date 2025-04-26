@@ -6,6 +6,7 @@ using HutongGames.PlayMaker.Actions;
 using UnityEngine;
 using System.Collections.Generic;
 using System;
+using Alexandria.ItemAPI;
 
 namespace MouseOnlyMod
 {
@@ -14,7 +15,7 @@ namespace MouseOnlyMod
     {
         #region Properties
         private static PlayerController CurrentPlayer { get; set; }
-        private static RoomHandler CurrentRoom => CurrentPlayer?.CurrentRoom;
+        private static RoomHandler CurrentRoom => CurrentPlayer.CurrentRoom;
         private static Vector2 PlayerPosition => CurrentPlayer.CenterPosition;
         private static Vector2 PlayerVelocity
         {
@@ -27,6 +28,12 @@ namespace MouseOnlyMod
         private static Vector2? _lastSlideDirection = null;
         private static float _slideCooldownTimer = 0f;
 
+        // Combat area itself and its debug variables.
+        private static Rect combatArea;
+        private static GameObject[] combatBorders = new GameObject[4];
+        private static bool Debug_ShowCombatAreaBorders = false;
+
+        // The main method the AI behavior.
         static void Postfix(PlayerController __instance)
         {
             // Update the current player instance.
@@ -42,6 +49,9 @@ namespace MouseOnlyMod
                 PlayerVelocity = Vector2.zero;
                 return;
             }
+
+            // Update the combat area of the current room.
+            combatArea = CalculateCombatArea();
 
             UpdateSlideCooldown();
 
@@ -66,7 +76,7 @@ namespace MouseOnlyMod
                     }
                 }
                 // During combat, and keep the distance from the enemies.
-                else if (CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
+                else if (CurrentPlayer.IsInCombat)
                 {
                     HandleEnemySpacing();
                 }
@@ -79,11 +89,20 @@ namespace MouseOnlyMod
 
             // In general, dodge roll when mouse left button is clicked.
             ManualDodgeRoll();
-        }   // end of Postfix method
+
+            if (CurrentPlayer.IsInCombat && Debug_ShowCombatAreaBorders)
+            {
+                UpdateCombatAreaBorders();
+            }
+            else
+            {
+                DestroyCombatAreaBorders();
+            }
+        }
 
 
         // Slide cooldown helper function
-        private static void UpdateSlideCooldown()
+        public static void UpdateSlideCooldown()
         {
             if (_slideCooldownTimer > 0.0f)
             {
@@ -97,7 +116,7 @@ namespace MouseOnlyMod
         }
 
         // Allow the player to dodge roll toward cursor by right-clicking.
-        private static void ManualDodgeRoll()
+        public static void ManualDodgeRoll()
         {
             if (Input.GetMouseButtonDown(1) && !CurrentPlayer.IsDodgeRolling)
             {
@@ -108,6 +127,61 @@ namespace MouseOnlyMod
                 CurrentPlayer.StartDodgeRoll(dodgeDir);
             }
         }
+
+        // Calculate the combat area of the current room.
+        public static Rect CalculateCombatArea()
+        {
+            RoomHandler room = CurrentPlayer.CurrentRoom;
+            if (room == null)
+                return new Rect();
+
+            Vector2 min = new Vector2(float.MaxValue, float.MaxValue);
+            Vector2 max = new Vector2(float.MinValue, float.MinValue);
+
+            // Iterate through all cells in the room and find the min/max bounds.
+            foreach (IntVector2 cellPos in room.Cells)
+            {
+                var cell = GameManager.Instance.Dungeon.data[cellPos];
+                if (cell != null && cell.type == CellType.FLOOR && !cell.isExitCell && !cell.isDoorFrameCell)
+                {
+                    // Perfect offset to make the combat area more accurate.
+                    Vector2 worldPos = cellPos.ToVector2() + new Vector2(0.5f, 1.3f);
+                    min = Vector2.Min(min, worldPos);
+                    max = Vector2.Max(max, worldPos);
+                }
+            }
+
+            // Slightly enlarge bounds to make the combat area more accurate.
+            min -= Vector2.one * 0.15f;
+            max += Vector2.one * 0.15f;
+
+            return new Rect(min, max - min);
+        }
+
+        // Try to keep the player in the combat area.
+        public static void BindToCombatArea()
+        {
+            // If the player is out of the combat area during combat, correct their velocity.
+            if (CurrentPlayer.IsInCombat && !combatArea.Contains(PlayerPosition))
+            {
+                Vector2 correctedDir = PlayerVelocity;
+
+                // Handle X axis
+                if (PlayerPosition.x < combatArea.xMin && correctedDir.x < 0f)
+                    correctedDir.x = 0f; // Moving left when need to move right, cancel X
+                if (PlayerPosition.x > combatArea.xMax && correctedDir.x > 0f)
+                    correctedDir.x = 0f; // Moving right when need to move left, cancel X
+
+                // Handle Y axis
+                if (PlayerPosition.y < combatArea.yMin && correctedDir.y < 0f)
+                    correctedDir.y = 0f; // Moving down when need to move up, cancel Y
+                if (PlayerPosition.y > combatArea.yMax && correctedDir.y > 0f)
+                    correctedDir.y = 0f; // Moving up when need to move down, cancel Y
+
+                PlayerVelocity = correctedDir;
+            }
+        }
+
 
         // Find the dangerous bullets in the scene.
         public static List<Projectile> DetectDangerousBullets()
@@ -167,8 +241,7 @@ namespace MouseOnlyMod
 
             // If the player is out of combat and IncreaseSpeedOutOfCombat option is turned on, boost the speed.
             float speed = CurrentPlayer.stats.MovementSpeed;
-            if (!CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear) &&
-                GameManager.Options.IncreaseSpeedOutOfCombat)
+            if (!CurrentPlayer.IsInCombat && GameManager.Options.IncreaseSpeedOutOfCombat)
                 speed *= 1.5f;
 
             TryMove(finalDirection, speed);
@@ -198,10 +271,17 @@ namespace MouseOnlyMod
             if (nearestEnemy != null)
             {
                 Vector2 enemyPos = nearestEnemy.CenterPosition;
+                Debug.DrawLine(new Vector3(PlayerPosition.x, PlayerPosition.y, 0f), new Vector3(enemyPos.x, enemyPos.y, 0f), Color.red);
                 float distance = Vector2.Distance(PlayerPosition, enemyPos);
 
+                // Dodge roll if the enemy is too close.
+                if (distance < 2.0f)
+                {
+                    SafeDodgeRoll();
+                    return;
+                }
                 // Move away if the enemy is closer than the ideal distance.
-                if (distance < idealDistance - distanceThreshold)
+                else if (distance < idealDistance - distanceThreshold)
                 {
                     Vector2 directionAway = (PlayerPosition - enemyPos).normalized;
 
@@ -294,7 +374,7 @@ namespace MouseOnlyMod
                 PlayerVelocity = direction * speed;
             }
             // If the direction is containing any obstacles, try to slide through them.
-            else if (CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
+            else if (CurrentPlayer.IsInCombat)
             {
                 Vector2? slide = FindSlideAlongWallDirection(direction);
                 if (slide.HasValue)
@@ -312,6 +392,8 @@ namespace MouseOnlyMod
             {
                 PlayerVelocity = Vector2.zero;
             }
+            // Always bind the player to the combat area during combat.
+            BindToCombatArea();
         }
 
         // Want to move but faced an obstacle? Try to slide along it.
@@ -344,7 +426,7 @@ namespace MouseOnlyMod
 
 
         // Literally, check AABB collision of given two objects.
-        public static bool CheckAABBCollision(PixelCollider a, Vector2 aPos, PixelCollider b, Vector2 bPos, float padding = 10.0f)
+        public static bool CheckAABBCollision(PixelCollider a, Vector2 aPos, PixelCollider b, Vector2 bPos, float padding = 5.0f)
         {
             float aMinX = aPos.x + a.MinX - padding;
             float aMaxX = aPos.x + a.MaxX + padding;
@@ -388,7 +470,7 @@ namespace MouseOnlyMod
         }
 
         // Is the player about to get hit next frame? Find the best direction to roll.
-        public static void SafeDodgeRoll(List<Projectile> dangerousBullets)
+        public static void SafeDodgeRoll(List<Projectile> dangerousBullets = null)
         {
             Vector2 bestDirection = Vector2.zero;
             float bestScore = float.MinValue;
@@ -425,13 +507,12 @@ namespace MouseOnlyMod
                 const float ROLL_DISTANCE = 5.5f;
                 const float ROLL_TIME = 0.7f;
 
-                // Skip if the direction contains obstacles
-                if (!IsDirectionClear(dir, ROLL_DISTANCE))
-                    continue;
-
                 // The expected destination of the roll.
                 Vector2 rollTarget = PlayerPosition + dir * ROLL_DISTANCE;
 
+                // Skip if the direction contains obstacles or is out of combat area.
+                if (!IsDirectionClear(dir, ROLL_DISTANCE) || !combatArea.Contains(rollTarget))
+                    continue;
 
                 // 1. Away from the enemies score (further is safer)
                 float awayFromEnemyScore = 0.0f;
@@ -442,8 +523,8 @@ namespace MouseOnlyMod
 
 
                 // Iterate through all enemy bullets in the room.
-                float minBulletDist = float.MaxValue;
-                int bulletsNearDestination = 0;
+                float bulletDistanceScore = float.MaxValue;
+                float bulletCountDeduction = 0;
                 foreach (Projectile proj in StaticReferenceManager.AllProjectiles)
                 {
                     if (proj.Owner is PlayerController)
@@ -456,33 +537,33 @@ namespace MouseOnlyMod
                     float dist = Vector2.Distance(rollTarget, futureBulletPos);
 
                     // 2. Nearest bullet distance score (further is safer)
-                    if (dist < minBulletDist)
-                        minBulletDist = dist;
+                    if (dist < bulletDistanceScore)
+                        bulletDistanceScore = dist;
 
                     // 3. Bullet count nearby destination score (less is safer)
                     if (dist < 5.0f)
-                        bulletsNearDestination++;
+                        bulletCountDeduction++;
                 }
-                float bulletDistanceScore = minBulletDist;
-                float bulletCountDeduction = bulletsNearDestination;
 
 
-                float perpendicularScoreTotal = 0.0f;
-                foreach (Projectile proj in dangerousBullets)
+                float perpendicularScore = 0.0f;
+                if (dangerousBullets != null)
                 {
-                    float angleDiff = Vector2.Angle(dir, proj.Direction.normalized);
-                    float perpendicularScore = 90f - Mathf.Abs(90f - angleDiff); // Max at 90°, 0 at 0°/180°
+                    foreach (Projectile proj in dangerousBullets)
+                    {
+                        float angleDiff = Vector2.Angle(dir, proj.Direction.normalized);
 
-                    // 4. Bullet alignment score (prefer perpendicular)
-                    perpendicularScoreTotal += perpendicularScore;
+                        // 4. Bullet alignment score (prefer perpendicular)
+                        perpendicularScore += 90f - Mathf.Abs(90f - angleDiff);
+                    }
+                    perpendicularScore /= Mathf.Max(1, dangerousBullets.Count);
                 }
-                float avgPerpendicularScore = perpendicularScoreTotal / Mathf.Max(1, dangerousBullets.Count);
 
 
 
                 // Combine all scores
-                float score = awayFromEnemyScore * 0.3f + bulletDistanceScore * 1.5f + avgPerpendicularScore * 0.1f - Mathf.Min(bulletCountDeduction * 2.0f, 5.0f);
-                // ETGModConsole.Log("[DEBUG] Direction = (" + dir.x + ", " + dir.y + ") Score = " + awayFromEnemyScore * 0.3f + " + " + bulletDistanceScore * 1.5f + " + " + avgPerpendicularScore * 0.1f + " - " + Mathf.Min(bulletCountDeduction * 2.0f, 5.0f) + " = " + score);
+                float score = awayFromEnemyScore * 0.2f + bulletDistanceScore * 2.0f + perpendicularScore * 0.2f - Mathf.Min(bulletCountDeduction * 2.0f, 5.0f);
+                //ETGModConsole.Log("[DEBUG] Direction = (" + dir.x + ", " + dir.y + ") Score = " + awayFromEnemyScore * 0.3f + " + " + bulletDistanceScore * 1.5f + " + " + perpendicularScore * 0.3f + " - " + Mathf.Min(bulletCountDeduction * 2.0f, 5.0f) + " = " + score);
 
                 // Update the best score
                 if (score > bestScore)
@@ -497,7 +578,63 @@ namespace MouseOnlyMod
             {
                 CurrentPlayer.StartDodgeRoll(bestDirection);
             }
-            // ETGModConsole.Log("[DEBUG] End of SafeDodgeRoll");
+            //ETGModConsole.Log("[DEBUG] End of SafeDodgeRoll");
         }
+
+
+        #region DebugMethods
+        #region CombatAreaBorders
+        // Create the combat area border with red color.
+        public static void CreateCombatAreaBorders()
+        {
+            if (combatBorders[0] != null) return; // Already created
+
+            for (int i = 0; i < 4; i++)
+            {
+                combatBorders[i] = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                combatBorders[i].GetComponent<Renderer>().material.color = Color.red;
+                combatBorders[i].GetComponent<Renderer>().sortingOrder = 1000;
+            }
+        }
+
+        // Update the combat area borders with perfect position and scale.
+        public static void UpdateCombatAreaBorders()
+        {
+            if (!Debug_ShowCombatAreaBorders) return;
+            if (combatBorders[0] == null) CreateCombatAreaBorders();
+
+            float thickness = 0.2f;
+
+            // Top
+            combatBorders[0].transform.position = new Vector3(combatArea.center.x, combatArea.yMax, 1f);
+            combatBorders[0].transform.localScale = new Vector3(combatArea.width, thickness, 1f);
+
+            // Bottom
+            combatBorders[1].transform.position = new Vector3(combatArea.center.x, combatArea.yMin, 1f);
+            combatBorders[1].transform.localScale = new Vector3(combatArea.width, thickness, 1f);
+
+            // Left
+            combatBorders[2].transform.position = new Vector3(combatArea.xMin, combatArea.center.y, 1f);
+            combatBorders[2].transform.localScale = new Vector3(thickness, combatArea.height, 1f);
+
+            // Right
+            combatBorders[3].transform.position = new Vector3(combatArea.xMax, combatArea.center.y, 1f);
+            combatBorders[3].transform.localScale = new Vector3(thickness, combatArea.height, 1f);
+        }
+
+        // Destroy the combat area borders.
+        public static void DestroyCombatAreaBorders()
+        {
+            for (int i = 0; i < combatBorders.Length; i++)
+            {
+                if (combatBorders[i] != null)
+                {
+                    UnityEngine.Object.Destroy(combatBorders[i]);
+                    combatBorders[i] = null;
+                }
+            }
+        }
+        #endregion CombatAreaBorders
+        #endregion DebugMethods
     }
 }
