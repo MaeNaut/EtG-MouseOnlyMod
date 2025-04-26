@@ -5,96 +5,125 @@ using HarmonyLib;
 using HutongGames.PlayMaker.Actions;
 using UnityEngine;
 using System.Collections.Generic;
+using System;
 
 namespace MouseOnlyMod
 {
     [HarmonyPatch(typeof(PlayerController), "Update")]
     public class InputPatch
     {
+        #region Properties
+        private static PlayerController CurrentPlayer { get; set; }
+        private static RoomHandler CurrentRoom => CurrentPlayer?.CurrentRoom;
+        private static Vector2 PlayerPosition => CurrentPlayer.CenterPosition;
+        private static Vector2 PlayerVelocity
+        {
+            get => CurrentPlayer.specRigidbody.Velocity;
+            set => CurrentPlayer.specRigidbody.Velocity = value;
+        }
+        #endregion Properties
+
         // It is a timer to prevent the player and camera from trembling.
         private static Vector2? _lastSlideDirection = null;
         private static float _slideCooldownTimer = 0f;
 
         static void Postfix(PlayerController __instance)
         {
+            // Update the current player instance.
+            CurrentPlayer = __instance;
+
             // Is the mouse-only mod disabled?
-            if (!Plugin.MouseOnlyEnabled || __instance == null || __instance.CurrentRoom == null) return;
+            if (!Plugin.MouseOnlyEnabled || CurrentPlayer == null || CurrentRoom == null)
+                return;
 
             // If the player is in case where any input is not accepted, skip the whole Postfix method.
-            if (!__instance.AcceptingAnyInput)
+            if (!CurrentPlayer.AcceptingAnyInput)
             {
-                __instance.specRigidbody.Velocity = Vector2.zero;
+                PlayerVelocity = Vector2.zero;
                 return;
             }
 
-            // Make it simple.
-            Vector2 playerPos = __instance.CenterPosition;
-
-            _slideCooldownTimer -= BraveTime.DeltaTime;
-            if (_slideCooldownTimer < 0f)
-            {
-                _slideCooldownTimer = 0f;
-                _lastSlideDirection = null;
-            }
+            UpdateSlideCooldown();
 
             // Find and store the most dangerous bullet in the scene.
-            List<Projectile> dangerousBullets = DetectDangerousBullets(__instance);
+            List<Projectile> dangerousBullets = DetectDangerousBullets();
 
             // Enable mouse input if the player is not rolling.
-            if (!__instance.IsDodgeRolling)
+            if (!CurrentPlayer.IsDodgeRolling)
             {
                 // During combat, and a dangerous projectile is found.
                 if (dangerousBullets != null)
                 {
                     // If the bullet is expected to hit next frame, roll to the safe position.
-                    if (WillBulletHitPlayerNextFrame(__instance, dangerousBullets))
+                    if (WillBulletHitPlayerNextFrame(dangerousBullets))
                     {
-                        SafeDodgeRoll(__instance, dangerousBullets);
+                        SafeDodgeRoll(dangerousBullets);
                     }
                     // If not, avoid from the bullet.
                     else
                     {
-                        HandleBulletAvoidance(__instance, dangerousBullets);
+                        HandleBulletAvoidance(dangerousBullets);
                     }
                 }
                 // During combat, and keep the distance from the enemies.
-                else if (__instance.CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
+                else if (CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
                 {
-                    HandleEnemySpacing(__instance);
+                    HandleEnemySpacing();
                 }
                 // Out of combat, so just follow the cursor.
                 else
                 {
-                    HandleMouseFollow(__instance);
+                    HandleMouseFollow();
                 }
             }
 
-            // Manual dodge roll (right-click)
-            if (Input.GetMouseButtonDown(1) && !__instance.IsDodgeRolling)
-            {
-                Vector2 dodgeDir = (Camera.main.ScreenToWorldPoint(Input.mousePosition).XY() - playerPos).normalized;
-                if (dodgeDir.magnitude < 0.1f) dodgeDir = Vector2.right;
-                __instance.StartDodgeRoll(dodgeDir);
-            }
+            // In general, dodge roll when mouse left button is clicked.
+            ManualDodgeRoll();
         }   // end of Postfix method
 
 
+        // Slide cooldown helper function
+        private static void UpdateSlideCooldown()
+        {
+            if (_slideCooldownTimer > 0.0f)
+            {
+                _slideCooldownTimer -= BraveTime.DeltaTime;
+            }
+            else
+            {
+                _slideCooldownTimer = 0.0f;
+                _lastSlideDirection = null;
+            }
+        }
+
+        // Allow the player to dodge roll toward cursor by right-clicking.
+        private static void ManualDodgeRoll()
+        {
+            if (Input.GetMouseButtonDown(1) && !CurrentPlayer.IsDodgeRolling)
+            {
+                Vector2 dodgeDir = (Camera.main.ScreenToWorldPoint(Input.mousePosition).XY() - PlayerPosition).normalized;
+                if (dodgeDir.magnitude < 0.1f)
+                    dodgeDir = Vector2.right;
+
+                CurrentPlayer.StartDodgeRoll(dodgeDir);
+            }
+        }
+
         // Find the dangerous bullets in the scene.
-        public static List<Projectile> DetectDangerousBullets(PlayerController player)
+        public static List<Projectile> DetectDangerousBullets()
         {
             List<Projectile> dangerousBullets = new List<Projectile>();
             
-            Vector2 playerPos = player.CenterPosition;
             float dangerRadius = 2.5f;
 
             // Always check for the incoming bullets.
             foreach (Projectile proj in StaticReferenceManager.AllProjectiles)
             {
-                if (proj == null || !proj.sprite || !proj.isActiveAndEnabled || proj.Owner is PlayerController)
+                if (proj == null || proj.Owner is PlayerController)
                     continue;
 
                 Vector2 bulletPos = proj.sprite.WorldCenter;
-                Vector2 toPlayer = playerPos - bulletPos;
+                Vector2 toPlayer = PlayerPosition - bulletPos;
                 float distance = toPlayer.magnitude;
                 float angleDiff = Vector2.Angle(toPlayer, proj.Direction);
 
@@ -106,25 +135,20 @@ namespace MouseOnlyMod
             }
 
             // Return the list of dangerous bullets or null.
-            if (dangerousBullets.Count <= 0)
-                return null;
-            return dangerousBullets;
+            return dangerousBullets.Count > 0 ? dangerousBullets : null;
         }
 
 
         // Avoid the dangerous bullets found from DetectDangerousBullet.
-        public static void HandleBulletAvoidance(PlayerController player, List<Projectile> dangerousBullets)
+        public static void HandleBulletAvoidance(List<Projectile> dangerousBullets)
         {
-            Vector2 playerPos = player.CenterPosition;
-            float speed = player.stats.MovementSpeed;
-
             // Calculate the direction that is the average direction from the dangerous bullets
             Vector2 combinedBulletDir = Vector2.zero;
             foreach (Projectile proj in dangerousBullets)
             {
                 combinedBulletDir += proj.Direction;
             }
-            combinedBulletDir = combinedBulletDir.normalized;
+            combinedBulletDir.Normalize();
 
             // Perpendicular directions
             Vector2 perp1 = new Vector2(-combinedBulletDir.y, combinedBulletDir.x);
@@ -136,33 +160,30 @@ namespace MouseOnlyMod
             Vector2 diag2 = (perp2 + combinedBulletDir * retreatWeight).normalized;
 
             // Choose the one that moves the player further from the bullet
-            float a1 = Vector2.Angle(player.specRigidbody.Velocity.normalized, diag1);
-            float a2 = Vector2.Angle(player.specRigidbody.Velocity.normalized, diag2);
-
+            Vector2 playerDir = PlayerVelocity.normalized;
+            float a1 = Vector2.Angle(playerDir, diag1);
+            float a2 = Vector2.Angle(playerDir, diag2);
             Vector2 finalDirection = a1 < a2 ? diag1 : diag2;
 
             // If the player is out of combat and IncreaseSpeedOutOfCombat option is turned on, boost the speed.
-            if (!player.CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear) &&
+            float speed = CurrentPlayer.stats.MovementSpeed;
+            if (!CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear) &&
                 GameManager.Options.IncreaseSpeedOutOfCombat)
                 speed *= 1.5f;
 
-            TryMove(player, finalDirection, speed);
+            TryMove(finalDirection, speed);
         }
 
         // Keep the best distance from the nearest enemy in the scene.
-        public static void HandleEnemySpacing(PlayerController player)
+        public static void HandleEnemySpacing()
         {
-            Vector2 playerPos = player.CenterPosition;
-            float speed = player.stats.MovementSpeed;
+            float speed = CurrentPlayer.stats.MovementSpeed;
             float idealDistance = 7.0f;
             float distanceThreshold = 0.5f;
 
             // If there is a boss in current room, increase the distance.
-            foreach (AIActor enemy in player?.CurrentRoom.activeEnemies)
+            foreach (AIActor enemy in CurrentRoom.activeEnemies)
             {
-                if (enemy == null || !enemy.healthHaver || enemy.healthHaver.IsDead || enemy.CompanionOwner)
-                    continue;
-
                 if (enemy.healthHaver.IsBoss)
                 {
                     idealDistance = 10.0f;
@@ -172,70 +193,74 @@ namespace MouseOnlyMod
             }
 
             // Get the nearest enemy in the current room.
-            AIActor nearestEnemy = player.CurrentRoom.GetNearestEnemy(playerPos, out float distToEnemy, true, true);
+            AIActor nearestEnemy = CurrentRoom.GetNearestEnemy(PlayerPosition, out float distToEnemy, true, true);
 
             if (nearestEnemy != null)
             {
                 Vector2 enemyPos = nearestEnemy.CenterPosition;
-                float distance = Vector2.Distance(playerPos, enemyPos);
+                float distance = Vector2.Distance(PlayerPosition, enemyPos);
 
                 // Move away if the enemy is closer than the ideal distance.
                 if (distance < idealDistance - distanceThreshold)
                 {
-                    Vector2 directionAway = (playerPos - enemyPos).normalized;
+                    Vector2 directionAway = (PlayerPosition - enemyPos).normalized;
 
-                    TryMove(player, directionAway, speed);
+                    TryMove(directionAway, speed);
                 }
                 // Move toward if the enemy is further than the ideal distance.
                 else if (distance > idealDistance + distanceThreshold)
                 {
-                    Vector2 directionToward = (enemyPos - playerPos).normalized;
+                    Vector2 directionToward = (enemyPos - PlayerPosition).normalized;
 
-                    TryMove(player, directionToward, speed);
+                    TryMove(directionToward, speed);
                 }
                 // No need to move once the enemy is within the ideal distance.
                 else
                 {
-                    player.specRigidbody.Velocity = Vector2.zero;
+                    PlayerVelocity = Vector2.zero;
                 }
             }
         }
 
         // Make the player character follow the mouse cursor.
-        public static void HandleMouseFollow(PlayerController player)
+        public static void HandleMouseFollow()
         {
-            Vector2 playerPos = player.CenterPosition;
-            float speed = player.stats.MovementSpeed;
+            //Vector3 mouseWorldPos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+            //mouseWorldPos.z = 0f;
 
-            Vector3 mouseWorldPos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
-            mouseWorldPos.z = 0f;
-
-            Vector2 mousePos = mouseWorldPos.XY();
-            float distance = Vector2.Distance(playerPos, mousePos);
+            Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition).XY();
+            float distance = Vector2.Distance(PlayerPosition, mousePos);
+            float speed = CurrentPlayer.stats.MovementSpeed;
 
             // If the cursor is some distance away from the character, follow it.
             if (distance > 1.5f)
             {
-                Vector2 direction = (mousePos - playerPos).normalized;
+                Vector2 direction = (mousePos - PlayerPosition).normalized;
 
                 if (GameManager.Options.IncreaseSpeedOutOfCombat)
                     speed *= 1.5f;
 
-                TryMove(player, direction, speed);
+                TryMove(direction, speed);
             }
             // If not, stop.
             else
             {
-                player.specRigidbody.Velocity = Vector2.zero;
+                PlayerVelocity = Vector2.zero;
             }
         }
 
 
         // Validate if the moving direction is not blocked by any obstacles.
-        public static bool IsDirectionClear(PlayerController player, Vector2 direction, float distance = 0.5f)
+        public static bool IsDirectionClear(Vector2 direction, float distance = 0.5f)
         {
-            Vector2 offsetOrigin = player.CenterPosition + new Vector2(0f, -0.5f);
-            Vector2 step = direction.normalized * 0.5f; // checks every ~0.5 units
+            // Must offset, or the method will return false for left/right directions
+            // when the player is right below the wallss.
+            Vector2 offsetOrigin = PlayerPosition + new Vector2(0f, -0.5f);
+
+            // Check every ~0.5 units
+            Vector2 step = direction.normalized * 0.5f;
+
+            // Number of steps, but at least 1 step even if distance is 0.0f.
             int steps = Mathf.Max(1, Mathf.CeilToInt(distance / 0.5f));
 
             for (int i = 1; i <= steps; i++)
@@ -243,9 +268,9 @@ namespace MouseOnlyMod
                 Vector2 pos = offsetOrigin + step * i;
                 IntVector2 cell = pos.ToIntVector2(VectorConversions.Floor);
 
+                // If data are invalid, return false.
                 if (!GameManager.Instance.Dungeon.data.CheckInBoundsAndValid(cell))
                     return false;
-
                 CellData cellData = GameManager.Instance.Dungeon.data[cell];
                 if (cellData == null)
                     return false;
@@ -253,7 +278,7 @@ namespace MouseOnlyMod
                 // If the direction contains a wall, pit, or door, return false.
                 bool isFloor = cellData.type == CellType.FLOOR;
                 bool isDoor = cellData.isDoorFrameCell;
-                if (!isFloor || (isDoor && player.IsInCombat))
+                if (!isFloor || (isDoor && CurrentPlayer.IsInCombat))
                     return false;
             }
 
@@ -261,53 +286,53 @@ namespace MouseOnlyMod
         }
 
         // Try moving the player.
-        public static void TryMove(PlayerController player, Vector2 direction, float speed)
+        public static void TryMove(Vector2 direction, float speed)
         {
             // If the direction is valid, move.
-            if (IsDirectionClear(player, direction))
+            if (IsDirectionClear(direction))
             {
-                player.specRigidbody.Velocity = direction * speed;
+                PlayerVelocity = direction * speed;
             }
             // If the direction is containing any obstacles, try to slide through them.
-            else if (player.CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
+            else if (CurrentRoom.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
             {
-                Vector2? slide = FindSlideAlongWallDirection(player, direction);
+                Vector2? slide = FindSlideAlongWallDirection(direction);
                 if (slide.HasValue)
                 {
-                    player.specRigidbody.Velocity = slide.Value * speed;
+                    PlayerVelocity = slide.Value * speed;
                     _lastSlideDirection = slide.Value;
                     _slideCooldownTimer = 0.1f;
                 }
                 else
                 {
-                    player.specRigidbody.Velocity = Vector2.zero;
+                    PlayerVelocity = Vector2.zero;
                 }
             }
             else
             {
-                player.specRigidbody.Velocity = Vector2.zero;
+                PlayerVelocity = Vector2.zero;
             }
         }
 
         // Want to move but faced an obstacle? Try to slide along it.
-        public static Vector2? FindSlideAlongWallDirection(PlayerController player, Vector2 desiredDirection, float checkDistance = 0.5f)
+        public static Vector2? FindSlideAlongWallDirection(Vector2 direction, float checkDistance = 0.5f)
         {
-            Vector2 perpLeft = new Vector2(-desiredDirection.y, desiredDirection.x);   // 90° left
-            Vector2 perpRight = new Vector2(desiredDirection.y, -desiredDirection.x);  // 90° right
+            Vector2 perpLeft = new Vector2(-direction.y, direction.x);   // 90° left
+            Vector2 perpRight = new Vector2(direction.y, -direction.x);  // 90° right
 
-            if (_lastSlideDirection.HasValue && IsDirectionClear(player, _lastSlideDirection.Value, checkDistance))
+            if (_lastSlideDirection.HasValue && IsDirectionClear(_lastSlideDirection.Value, checkDistance))
             {
                 return _lastSlideDirection;
             }
 
-            if (IsDirectionClear(player, perpLeft, checkDistance))
+            if (IsDirectionClear(perpLeft, checkDistance))
             {
                 _lastSlideDirection = perpLeft;
                 _slideCooldownTimer = 0.1f;
                 return perpLeft;
             }
 
-            if (IsDirectionClear(player, perpRight, checkDistance))
+            if (IsDirectionClear(perpRight, checkDistance))
             {
                 _lastSlideDirection = perpRight;
                 _slideCooldownTimer = 0.1f;
@@ -331,29 +356,26 @@ namespace MouseOnlyMod
             float bMinY = bPos.y + b.MinY - padding;
             float bMaxY = bPos.y + b.MaxY + padding;
 
-            return (aMinX <= bMaxX && aMaxX >= bMinX && aMinY <= bMaxY && aMaxY >= bMinY ||
-                    aMaxX <= bMinX && aMinX >= bMaxX && aMaxY <= bMinY && aMinY >= bMaxY);
+            return (aMinX <= bMaxX && aMaxX >= bMinX && aMinY <= bMaxY && aMaxY >= bMinY);
         }
 
         // Check if the player will get hit by the dangerous bullet next frame.
-        public static bool WillBulletHitPlayerNextFrame(PlayerController player, List<Projectile> dangerousBullets)
+        public static bool WillBulletHitPlayerNextFrame(List<Projectile> dangerousBullets)
         {
             // Calculate the player's position in next frame.
-            Vector2 playerPos = player.CenterPosition;
-            Vector2 playerVel = player.specRigidbody.Velocity;
-            Vector2 nextPlayerPos = playerPos + playerVel * BraveTime.DeltaTime;
+            Vector2 nextPlayerPos = PlayerPosition + PlayerVelocity * BraveTime.DeltaTime;
 
-            PixelCollider playerCollider = player.specRigidbody?.HitboxPixelCollider;
+            // Get the pixel collider of the player.
+            PixelCollider playerCollider = CurrentPlayer.specRigidbody?.HitboxPixelCollider;
             if (playerCollider == null)
                 return false;
 
             foreach (Projectile proj in dangerousBullets)
             {
                 // Calculate the dangerous bullet's position in next frame.
-                Vector2 bulletPos = proj.sprite.WorldCenter;
-                Vector2 bulletVel = proj.Direction.normalized * proj.Speed;
-                Vector2 nextBulletPos = bulletPos + bulletVel * BraveTime.DeltaTime;
+                Vector2 nextBulletPos = proj.sprite.WorldCenter + proj.Direction.normalized * proj.Speed * BraveTime.DeltaTime;
 
+                // Get the pixel collider of the bullet.
                 PixelCollider bulletCollider = proj.specRigidbody?.PrimaryPixelCollider;
                 if (bulletCollider == null)
                     return false;
@@ -366,7 +388,7 @@ namespace MouseOnlyMod
         }
 
         // Is the player about to get hit next frame? Find the best direction to roll.
-        public static void SafeDodgeRoll(PlayerController player, List<Projectile> dangerousBullets)
+        public static void SafeDodgeRoll(List<Projectile> dangerousBullets)
         {
             Vector2 bestDirection = Vector2.zero;
             float bestScore = float.MinValue;
@@ -387,10 +409,10 @@ namespace MouseOnlyMod
                 if (enemy == null || !enemy.healthHaver || enemy.healthHaver.IsDead)
                     continue;
 
-                float dist = Vector2.Distance(player.CenterPosition, enemy.CenterPosition);
+                float dist = Vector2.Distance(PlayerPosition, enemy.CenterPosition);
                 if (dist <= threatRange)
                 {
-                    threatVector += (enemy.CenterPosition - player.CenterPosition).normalized;
+                    threatVector += (enemy.CenterPosition - PlayerPosition).normalized;
                     threatCount++;
                 }
             }
@@ -404,11 +426,11 @@ namespace MouseOnlyMod
                 const float ROLL_TIME = 0.7f;
 
                 // Skip if the direction contains obstacles
-                if (!IsDirectionClear(player, dir, ROLL_DISTANCE))
+                if (!IsDirectionClear(dir, ROLL_DISTANCE))
                     continue;
 
                 // The expected destination of the roll.
-                Vector2 rollTarget = player.CenterPosition + dir * ROLL_DISTANCE;
+                Vector2 rollTarget = PlayerPosition + dir * ROLL_DISTANCE;
 
 
                 // 1. Away from the enemies score (further is safer)
@@ -460,7 +482,7 @@ namespace MouseOnlyMod
 
                 // Combine all scores
                 float score = awayFromEnemyScore * 0.3f + bulletDistanceScore * 1.5f + avgPerpendicularScore * 0.1f - Mathf.Min(bulletCountDeduction * 2.0f, 5.0f);
-                ETGModConsole.Log("[DEBUG] Direction = (" + dir.x + ", " + dir.y + ") Score = " + awayFromEnemyScore * 0.3f + " + " + bulletDistanceScore * 1.5f + " + " + avgPerpendicularScore * 0.1f + " - " + Mathf.Min(bulletCountDeduction * 2.0f, 5.0f) + " = " + score);
+                // ETGModConsole.Log("[DEBUG] Direction = (" + dir.x + ", " + dir.y + ") Score = " + awayFromEnemyScore * 0.3f + " + " + bulletDistanceScore * 1.5f + " + " + avgPerpendicularScore * 0.1f + " - " + Mathf.Min(bulletCountDeduction * 2.0f, 5.0f) + " = " + score);
 
                 // Update the best score
                 if (score > bestScore)
@@ -471,11 +493,11 @@ namespace MouseOnlyMod
             }
 
             // Dodge roll toward the best direction
-            if (!player.IsDodgeRolling)
+            if (!CurrentPlayer.IsDodgeRolling)
             {
-                player.StartDodgeRoll(bestDirection);
+                CurrentPlayer.StartDodgeRoll(bestDirection);
             }
-            ETGModConsole.Log("[DEBUG] End of SafeDodgeRoll");
+            // ETGModConsole.Log("[DEBUG] End of SafeDodgeRoll");
         }
     }
 }
